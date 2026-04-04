@@ -4,7 +4,7 @@ Markdown to PDF using [iA Writer templates](https://github.com/iainc/iA-Writer-T
 
 ## What it does
 
-1. Converts Markdown to HTML (via `cmark-gfm`)
+1. Converts Markdown to HTML (via statically linked cmark-gfm — no external dependencies)
 2. Applies an iA Writer `.iatemplate` bundle (CSS, fonts, layout)
 3. Renders header + footer from the template (logo, page numbers, etc.)
 4. Outputs a PDF that matches iA Writer's export — vector graphics, no rasterization
@@ -12,40 +12,106 @@ Markdown to PDF using [iA Writer templates](https://github.com/iainc/iA-Writer-T
 ## Requirements
 
 - macOS 13+
-- [cmark-gfm](https://github.com/github/cmark-gfm): `brew install cmark-gfm`
 - At least one `.iatemplate` bundle (ships with iA Writer, or [build your own](https://github.com/iainc/iA-Writer-Templates))
 
-## Build
+## Install
+
+### From source (recommended)
 
 ```bash
+git clone https://github.com/DERHAEUPTLING/iatemplate2pdf.git
+cd iatemplate2pdf
 swift build -c release
+# Optionally copy to PATH:
+cp .build/release/iatemplate2pdf /usr/local/bin/
 ```
 
-The binary is at `.build/release/iatemplate2pdf`.
+### From GitHub Release
+
+Download the universal binary (arm64 + x86_64) from [Releases](https://github.com/DERHAEUPTLING/iatemplate2pdf/releases):
+
+```bash
+curl -sL https://github.com/DERHAEUPTLING/iatemplate2pdf/releases/latest/download/iatemplate2pdf-macos-universal.tar.gz | tar xz
+sudo mv iatemplate2pdf /usr/local/bin/
+```
+
+## Setup
+
+On first use, iatemplate2pdf will detect installed iA Writer templates and ask you to choose a default:
+
+```
+No default template configured.
+
+Available templates:
+
+  [1] Helvetica
+  [2] DERHAEUPTLING
+  [3] Letter
+
+Choose default template [1-3]: 2
+Default template set to: DERHAEUPTLING
+```
+
+You can change this anytime:
+
+```bash
+iatemplate2pdf --setup               # Choose interactively
+iatemplate2pdf --list-templates       # Show available templates
+```
+
+The config is stored in `~/.config/iatemplate2pdf/config.json`.
 
 ## Usage
 
 ```bash
-# Basic — uses default template (DERHAEUPTLING)
-iatemplate2pdf input.md
+# Single file
+iatemplate2pdf doc.md
 
 # Specify output path
-iatemplate2pdf input.md output.pdf
+iatemplate2pdf doc.md output.pdf
 
-# Use a different template
-iatemplate2pdf input.md --template ~/path/to/Helvetica.iatemplate
+# Use a different template (one-off)
+iatemplate2pdf doc.md --template ~/path/to/Custom.iatemplate
 
-# Set title and author (used in header/title page if template supports it)
-iatemplate2pdf input.md --title "My Document" --author "Jane Doe"
+# Set title and author (used in header)
+iatemplate2pdf doc.md --title "My Document" --author "Jane Doe"
+
+# Batch conversion
+iatemplate2pdf *.md --output-dir ./export/
 ```
 
 ### Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--template <path>` | Path to `.iatemplate` bundle | DERHAEUPTLING (from iA Writer) |
-| `--title <text>` | Document title | Filename without extension |
-| `--author <text>` | Author name | "Martin Schwenzer" |
+| Flag                  | Description                           | Default            |
+| --------------------- | ------------------------------------- | ------------------ |
+| `--template <path>`   | Path to `.iatemplate` bundle          | Saved default      |
+| `--title <text>`      | Document title                        | Filename           |
+| `--author <text>`     | Author name                           | "Martin Schwenzer" |
+| `--output-dir <path>` | Output directory for batch conversion | —                  |
+| `--setup`             | Choose default template interactively | —                  |
+| `--list-templates`    | Show available templates              | —                  |
+
+## MCP Server
+
+iatemplate2pdf includes an MCP server for use with Claude Code and other MCP clients.
+
+### Register globally in Claude Code
+
+```bash
+claude mcp add --scope user iatemplate2pdf -- node /path/to/iatemplate2pdf/mcp/server.js
+```
+
+### MCP Tool
+
+**`iatemplate2pdf`** — Convert Markdown files to PDF
+
+Parameters:
+
+- `files` (required): Array of absolute paths to `.md` files
+- `output_dir` (optional): Output directory for PDFs
+- `template` (optional): Path to `.iatemplate` bundle
+- `title` (optional): Document title (single file only)
+- `author` (optional): Author name
 
 ## How it works
 
@@ -65,14 +131,19 @@ Example.iatemplate/
 
 iatemplate2pdf reads `Info.plist` for configuration, inlines all CSS and SVG resources, then renders body, header, and footer as separate vector PDFs via macOS WebKit (`WKWebView` + `NSPrintOperation`). The final PDF is composed with PDFKit — everything stays vector, nothing gets rasterized.
 
-## Template compatibility
+## Tests
 
-Any `.iatemplate` bundle that follows the [iA Writer template spec](https://github.com/iainc/iA-Writer-Templates) should work:
+```bash
+# CLI tests
+./scripts/test-cli.sh
 
-- Custom header/footer with logos, page numbers, dates
-- Custom fonts (must be installed on the system)
-- CSS print styles
-- SVG assets
+# MCP tests
+node mcp/test.js
+```
+
+## Author
+
+Built by Martin Schwenzer — [DER HÄUPTLING](https://derhaeuptling.de), Webdesign, SEO and online Marketing.
 
 ## License
 

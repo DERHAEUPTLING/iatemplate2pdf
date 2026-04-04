@@ -1,10 +1,147 @@
 import AppKit
 import WebKit
 import PDFKit
+import cmark
+import CMarkBridge
 
-// MARK: - Default template path
+// MARK: - Markdown → HTML (statically linked cmark-gfm, no external dependency)
 
-let defaultTemplatePath = NSString(string: "~/Library/Containers/pro.writer.mac/Data/Library/Application Support/iA Writer/Templates/DERHAEUPTLING.iatemplate").expandingTildeInPath
+func markdownToHTML(_ path: String) -> String? {
+    guard let data = FileManager.default.contents(atPath: path),
+          let md = String(data: data, encoding: .utf8) else { return nil }
+
+    cmark_gfm_core_extensions_ensure_registered()
+
+    let parser = cmark_parser_new(CMARK_OPT_UNSAFE)!
+    defer { cmark_parser_free(parser) }
+
+    // Attach GFM extensions
+    for ext in ["table", "strikethrough", "autolink", "tasklist"] {
+        if let e = cmark_find_syntax_extension(ext) {
+            cmark_parser_attach_syntax_extension(parser, e)
+        }
+    }
+
+    cmark_parser_feed(parser, md, md.utf8.count)
+    guard let doc = cmark_parser_finish(parser) else { return nil }
+    defer { cmark_node_free(doc) }
+
+    guard let html = cmark_render_html(doc, CMARK_OPT_UNSAFE, cmark_parser_get_syntax_extensions(parser)) else { return nil }
+    defer { free(html) }
+
+    return String(cString: html)
+}
+
+// MARK: - Config (persistent default template)
+
+struct AppConfig {
+    static let configDir = NSString(string: "~/.config/iatemplate2pdf").expandingTildeInPath
+    static let configFile = (configDir as NSString).appendingPathComponent("config.json")
+
+    // Directories where iA Writer stores templates
+    static let templateSearchPaths: [String] = [
+        NSString(string: "~/Library/Containers/pro.writer.mac/Data/Library/Application Support/iA Writer/Templates").expandingTildeInPath,
+        NSString(string: "~/Library/Application Support/iA Writer/Templates").expandingTildeInPath,
+        "/Library/Application Support/iA Writer/Templates",
+    ]
+
+    static func findTemplates() -> [(name: String, path: String)] {
+        var results: [(String, String)] = []
+        let fm = FileManager.default
+        for dir in templateSearchPaths {
+            guard let items = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for item in items where item.hasSuffix(".iatemplate") {
+                let fullPath = (dir as NSString).appendingPathComponent(item)
+                let name = (item as NSString).deletingPathExtension
+                // Verify it's a valid template (has Info.plist)
+                let plist = (fullPath as NSString).appendingPathComponent("Contents/Info.plist")
+                if fm.fileExists(atPath: plist) {
+                    results.append((name, fullPath))
+                }
+            }
+        }
+        // Deduplicate by name (prefer first found)
+        var seen = Set<String>()
+        return results.filter { seen.insert($0.0).inserted }
+    }
+
+    static func loadDefaultTemplate() -> String? {
+        guard let data = FileManager.default.contents(atPath: configFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let path = json["defaultTemplate"] as? String,
+              FileManager.default.fileExists(atPath: path) else {
+            return nil
+        }
+        return path
+    }
+
+    static func saveDefaultTemplate(_ path: String) {
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let json: [String: Any] = ["defaultTemplate": path]
+        if let data = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
+            fm.createFile(atPath: configFile, contents: data)
+        }
+    }
+
+    /// Interactive template selection. Returns chosen template path, or nil if none available.
+    static func interactiveSetup() -> String? {
+        let templates = findTemplates()
+
+        if templates.isEmpty {
+            fputs("No iA Writer templates found.\n", stderr)
+            fputs("Install iA Writer or place .iatemplate bundles in:\n", stderr)
+            for dir in templateSearchPaths {
+                fputs("  \(dir)\n", stderr)
+            }
+            return nil
+        }
+
+        fputs("\nAvailable templates:\n\n", stderr)
+        for (i, t) in templates.enumerated() {
+            fputs("  [\(i + 1)] \(t.name)\n", stderr)
+            fputs("      \(t.path)\n", stderr)
+        }
+        fputs("\n", stderr)
+
+        // If only one template, auto-select
+        if templates.count == 1 {
+            fputs("Only one template found — using \(templates[0].name).\n", stderr)
+            saveDefaultTemplate(templates[0].path)
+            fputs("Saved as default.\n\n", stderr)
+            return templates[0].path
+        }
+
+        fputs("Choose default template [1-\(templates.count)]: ", stderr)
+        guard let line = readLine(), let choice = Int(line),
+              choice >= 1, choice <= templates.count else {
+            fputs("Invalid choice.\n", stderr)
+            return nil
+        }
+
+        let selected = templates[choice - 1]
+        saveDefaultTemplate(selected.path)
+        fputs("Default template set to: \(selected.name)\n\n", stderr)
+        return selected.path
+    }
+
+    /// Resolve template path: --template flag > config > interactive setup
+    static func resolveTemplate(flagValue: String?) -> String? {
+        // Explicit --template flag always wins
+        if let flag = flagValue {
+            return flag
+        }
+
+        // Check saved config
+        if let saved = loadDefaultTemplate() {
+            return saved
+        }
+
+        // No config yet — run interactive setup
+        fputs("No default template configured.\n", stderr)
+        return interactiveSetup()
+    }
+}
 
 // MARK: - Template config from Info.plist
 
@@ -72,7 +209,6 @@ struct TemplateConfig {
             let attrs = String(result[attrsRange])
 
             if var svg = readResource(filename) {
-                // Transfer width, height, class from <img> to <svg>
                 var extra = ""
                 let patterns: [(String, String)] = [
                     (#"width="([^"]+)""#, "width"),
@@ -116,27 +252,10 @@ struct TemplateConfig {
 struct PageConfig {
     let paperWidth: CGFloat = 595.28
     let paperHeight: CGFloat = 841.89
-    // Body CSS handles horizontal padding (12pt 50pt in print mode).
-    // NSPrintInfo margins only control the non-printable area.
-    // Vertical margins = header/footer height (90pt each from template).
-    // Horizontal margins = 0 — CSS body padding handles it.
     let marginTop: CGFloat = 90
     let marginBottom: CGFloat = 90
     let marginLeft: CGFloat = 0
     let marginRight: CGFloat = 0
-}
-
-// MARK: - Markdown → HTML
-
-func markdownToHTML(_ path: String) -> String? {
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/cmark-gfm")
-    proc.arguments = ["--unsafe", "--extension", "table", path]
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    do { try proc.run(); proc.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
-    } catch { return nil }
 }
 
 // MARK: - Build body HTML
@@ -155,82 +274,81 @@ func buildBodyHTML(content: String, template: TemplateConfig) -> String {
     """
 }
 
-// MARK: - Synchronous WKWebView → PDF render (blocks until done)
-// Uses a nested RunLoop to allow sequential renders
+// MARK: - Reusable WebView renderer
 
-func renderHTMLToPDF(html: String, baseURL: URL, outputPath: String, paperSize: NSSize, margins: NSEdgeInsets) -> Bool {
-    var success = false
-    let done = DispatchSemaphore(value: 0)
+class PDFRenderer {
+    private let webView: WKWebView
+    private let navDelegate: NavDelegate
 
-    let webView = WKWebView(
-        frame: NSRect(x: 0, y: 0, width: paperSize.width, height: paperSize.height),
-        configuration: WKWebViewConfiguration()
-    )
+    init() {
+        let config = WKWebViewConfiguration()
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 595, height: 842), configuration: config)
+        navDelegate = NavDelegate()
+        webView.navigationDelegate = navDelegate
+        objc_setAssociatedObject(webView, "navDelegate", navDelegate, .OBJC_ASSOCIATION_RETAIN)
+    }
 
-    class NavHandler: NSObject, WKNavigationDelegate {
-        let outputURL: URL
-        let paperSize: NSSize
-        let margins: NSEdgeInsets
-        var onDone: ((Bool) -> Void)?
+    func render(html: String, baseURL: URL, outputPath: String, paperSize: NSSize, margins: NSEdgeInsets) -> Bool {
+        var success = false
+        let sem = DispatchSemaphore(value: 0)
 
-        init(outputURL: URL, paperSize: NSSize, margins: NSEdgeInsets) {
-            self.outputURL = outputURL
-            self.paperSize = paperSize
-            self.margins = margins
+        let outputURL = URL(fileURLWithPath: outputPath)
+        navDelegate.outputURL = outputURL
+        navDelegate.paperSize = paperSize
+        navDelegate.margins = margins
+        navDelegate.onDone = { result in
+            success = result
+            sem.signal()
         }
 
-        func webView(_ wv: WKWebView, didFinish navigation: WKNavigation!) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                let pi = NSPrintInfo()
-                pi.paperSize = self.paperSize
-                pi.topMargin = self.margins.top
-                pi.bottomMargin = self.margins.bottom
-                pi.leftMargin = self.margins.left
-                pi.rightMargin = self.margins.right
-                pi.isHorizontallyCentered = false
-                pi.isVerticallyCentered = false
-                pi.jobDisposition = .save
-                pi.dictionary().setObject(self.outputURL, forKey: NSPrintInfo.AttributeKey.jobSavingURL as NSCopying)
+        webView.loadHTMLString(html, baseURL: baseURL)
 
-                let op = wv.printOperation(with: pi)
-                op.showsPrintPanel = false
-                op.showsProgressPanel = false
-                op.runModal(for: NSWindow(), delegate: self, didRun: #selector(self.didRun(_:success:contextInfo:)), contextInfo: nil)
-            }
+        while sem.wait(timeout: .now()) == .timedOut {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
         }
 
-        func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError error: Error) {
-            onDone?(false)
-        }
+        return success
+    }
+}
 
-        @objc func didRun(_ op: NSPrintOperation, success: Bool, contextInfo: UnsafeMutableRawPointer?) {
-            onDone?(success)
+private class NavDelegate: NSObject, WKNavigationDelegate {
+    var outputURL: URL!
+    var paperSize: NSSize!
+    var margins: NSEdgeInsets!
+    var onDone: ((Bool) -> Void)?
+
+    func webView(_ wv: WKWebView, didFinish navigation: WKNavigation!) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            let pi = NSPrintInfo()
+            pi.paperSize = self.paperSize
+            pi.topMargin = self.margins.top
+            pi.bottomMargin = self.margins.bottom
+            pi.leftMargin = self.margins.left
+            pi.rightMargin = self.margins.right
+            pi.isHorizontallyCentered = false
+            pi.isVerticallyCentered = false
+            pi.jobDisposition = .save
+            pi.dictionary().setObject(self.outputURL!, forKey: NSPrintInfo.AttributeKey.jobSavingURL as NSCopying)
+
+            let op = wv.printOperation(with: pi)
+            op.showsPrintPanel = false
+            op.showsProgressPanel = false
+            op.runModal(for: NSWindow(), delegate: self, didRun: #selector(self.didRun(_:success:contextInfo:)), contextInfo: nil)
         }
     }
 
-    let outputURL = URL(fileURLWithPath: outputPath)
-    let handler = NavHandler(outputURL: outputURL, paperSize: paperSize, margins: margins)
-    handler.onDone = { result in
-        success = result
-        done.signal()
-    }
-    webView.navigationDelegate = handler
-    objc_setAssociatedObject(webView, "handler", handler, .OBJC_ASSOCIATION_RETAIN)
-
-    webView.loadHTMLString(html, baseURL: baseURL)
-
-    // Pump the run loop until rendering is done
-    while done.wait(timeout: .now()) == .timedOut {
-        RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+    func webView(_ wv: WKWebView, didFail nav: WKNavigation!, withError error: Error) {
+        onDone?(false)
     }
 
-    return success
+    @objc func didRun(_ op: NSPrintOperation, success: Bool, contextInfo: UnsafeMutableRawPointer?) {
+        onDone?(success)
+    }
 }
 
 // MARK: - Load first page of a PDF file (keeps vector data)
-// We must retain the PDFDocument, otherwise the PDFPage becomes invalid
 
-var retainedDocs: [PDFDocument] = []  // keep docs alive until program exits
+var retainedDocs: [PDFDocument] = []
 
 func loadPDFPage(from path: String) -> PDFPage? {
     guard let doc = PDFDocument(url: URL(fileURLWithPath: path)),
@@ -260,16 +378,13 @@ class AnnotatedPDFPage: PDFPage {
     override func bounds(for box: PDFDisplayBox) -> NSRect { original.bounds(for: box) }
 
     override func draw(with box: PDFDisplayBox, to ctx: CGContext) {
-        // Draw original body content
         original.draw(with: box, to: ctx)
 
         let b = original.bounds(for: box)
 
-        // Draw header PDF page at top (vector, no rasterization)
         if let hdr = headerPage {
             let hdrBounds = hdr.bounds(for: .mediaBox)
             ctx.saveGState()
-            // Translate to top of page, scale to fit header area
             let scaleX = b.width / hdrBounds.width
             let scaleY = hdrH / hdrBounds.height
             ctx.translateBy(x: 0, y: b.height - hdrH)
@@ -278,7 +393,6 @@ class AnnotatedPDFPage: PDFPage {
             ctx.restoreGState()
         }
 
-        // Draw footer PDF page at bottom (vector, no rasterization)
         if let ftr = footerPage {
             let ftrBounds = ftr.bounds(for: .mediaBox)
             ctx.saveGState()
@@ -291,141 +405,228 @@ class AnnotatedPDFPage: PDFPage {
     }
 }
 
-// MARK: - Main
+// MARK: - Convert a single Markdown file to PDF
+
+func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, renderer: PDFRenderer, docTitle: String, author: String) -> Bool {
+    guard let contentHTML = markdownToHTML(inputURL.path) else {
+        fputs("Error: Markdown conversion failed for \(inputURL.lastPathComponent)\n", stderr)
+        return false
+    }
+
+    let dateFmt = DateFormatter()
+    dateFmt.dateFormat = "dd.MM.yyyy"
+    let dateStr = dateFmt.string(from: Date())
+
+    fputs("  Rendering body...\n", stderr)
+    let pg = PageConfig()
+    let tmp = FileManager.default.temporaryDirectory
+    let bodyPDF = tmp.appendingPathComponent("md2pdf-body-\(UUID().uuidString).pdf").path
+    let bodyHTML = buildBodyHTML(content: contentHTML, template: template)
+    let bodyOk = renderer.render(
+        html: bodyHTML, baseURL: template.resourcesURL, outputPath: bodyPDF,
+        paperSize: NSSize(width: pg.paperWidth, height: pg.paperHeight),
+        margins: NSEdgeInsets(top: pg.marginTop, left: pg.marginLeft, bottom: pg.marginBottom, right: pg.marginRight)
+    )
+    guard bodyOk else { fputs("  Error: Body render failed\n", stderr); return false }
+
+    guard let bodyDoc = PDFDocument(url: URL(fileURLWithPath: bodyPDF)) else {
+        fputs("  Error: Cannot read body PDF\n", stderr); return false
+    }
+    let pageCount = bodyDoc.pageCount
+    fputs("  Body: \(pageCount) pages\n", stderr)
+
+    var headerPage: PDFPage? = nil
+    if let headerHTML = template.headerHTML(title: docTitle, date: dateStr) {
+        let headerPDFPath = tmp.appendingPathComponent("md2pdf-header-\(UUID().uuidString).pdf").path
+        let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        let hdrOk = renderer.render(
+            html: headerHTML, baseURL: template.resourcesURL, outputPath: headerPDFPath,
+            paperSize: NSSize(width: pg.paperWidth, height: template.headerHeight),
+            margins: zeroMargins
+        )
+        if hdrOk { headerPage = loadPDFPage(from: headerPDFPath) }
+    }
+
+    var footerPages: [PDFPage?] = []
+    for p in 1...pageCount {
+        if let footerHTML = template.footerHTML(pageNumber: p, pageCount: pageCount) {
+            let footerPDFPath = tmp.appendingPathComponent("md2pdf-footer-\(UUID().uuidString).pdf").path
+            let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            let ftrOk = renderer.render(
+                html: footerHTML, baseURL: template.resourcesURL, outputPath: footerPDFPath,
+                paperSize: NSSize(width: pg.paperWidth, height: template.footerHeight),
+                margins: zeroMargins
+            )
+            footerPages.append(ftrOk ? loadPDFPage(from: footerPDFPath) : nil)
+        } else {
+            footerPages.append(nil)
+        }
+    }
+
+    let result = PDFDocument()
+    for p in 0..<pageCount {
+        guard let page = bodyDoc.page(at: p) else { continue }
+        let annotated = AnnotatedPDFPage(
+            original: page,
+            header: headerPage,
+            footer: p < footerPages.count ? footerPages[p] : nil,
+            headerH: template.headerHeight,
+            footerH: template.footerHeight
+        )
+        result.insert(annotated, at: result.pageCount)
+    }
+
+    let ok = result.write(to: outputURL)
+    if ok { fputs("  → \(outputURL.path)\n", stderr) }
+    else { fputs("  Error: Write failed\n", stderr) }
+
+    try? FileManager.default.removeItem(atPath: bodyPDF)
+
+    return ok
+}
+
+// MARK: - CLI
 
 func printUsage() {
-    fputs("Usage: md2pdf <input.md> [output.pdf] [--template <path>] [--title <title>] [--author <author>]\n", stderr)
+    fputs("""
+    Usage: iatemplate2pdf <input.md ...> [output.pdf] [options]
+
+    Options:
+      --template <path>     Path to .iatemplate bundle
+      --title <text>        Document title (default: filename)
+      --author <text>       Author name (default: "Martin Schwenzer")
+      --output-dir <path>   Output directory for batch conversion
+      --setup               Choose default template interactively
+      --list-templates      List available iA Writer templates
+      --help, -h            Show this help
+
+    Examples:
+      iatemplate2pdf doc.md                          # Single file
+      iatemplate2pdf doc.md output.pdf               # Single file with output path
+      iatemplate2pdf *.md --output-dir ./export/     # Batch conversion
+      iatemplate2pdf --setup                         # Choose default template
+
+    """, stderr)
 }
 
 var args = CommandLine.arguments; args.removeFirst()
-guard !args.isEmpty else { printUsage(); exit(1) }
 
-var inputPath: String?
+// Handle --help with no args
+if args.isEmpty { printUsage(); exit(1) }
+
+var inputPaths: [String] = []
 var outputPath: String?
-var templatePath = defaultTemplatePath
+var outputDir: String?
+var templateFlag: String?
 var title: String?
 var author = "Martin Schwenzer"
+var runSetup = false
+var listTemplates = false
 
-var i = 0
-while i < args.count {
-    switch args[i] {
-    case "--template": i += 1; if i < args.count { templatePath = args[i] }
-    case "--title":    i += 1; if i < args.count { title = args[i] }
-    case "--author":   i += 1; if i < args.count { author = args[i] }
-    case "--help", "-h": printUsage(); exit(0)
+var idx = 0
+while idx < args.count {
+    switch args[idx] {
+    case "--template":        idx += 1; if idx < args.count { templateFlag = args[idx] }
+    case "--title":           idx += 1; if idx < args.count { title = args[idx] }
+    case "--author":          idx += 1; if idx < args.count { author = args[idx] }
+    case "--output-dir":      idx += 1; if idx < args.count { outputDir = args[idx] }
+    case "--setup":           runSetup = true
+    case "--list-templates":  listTemplates = true
+    case "--help", "-h":      printUsage(); exit(0)
     default:
-        if inputPath == nil { inputPath = args[i] }
-        else if outputPath == nil { outputPath = args[i] }
+        let arg = args[idx]
+        if arg.hasSuffix(".pdf") && outputDir == nil && inputPaths.count == 1 {
+            outputPath = arg
+        } else {
+            inputPaths.append(arg)
+        }
     }
-    i += 1
+    idx += 1
 }
 
-guard let input = inputPath else { fputs("Error: No input\n", stderr); exit(1) }
+// --list-templates: show and exit
+if listTemplates {
+    let templates = AppConfig.findTemplates()
+    if templates.isEmpty {
+        fputs("No templates found.\n", stderr)
+    } else {
+        let current = AppConfig.loadDefaultTemplate()
+        fputs("Available templates:\n\n", stderr)
+        for t in templates {
+            let marker = (t.path == current) ? " (default)" : ""
+            fputs("  \(t.name)\(marker)\n", stderr)
+            fputs("  \(t.path)\n\n", stderr)
+        }
+    }
+    exit(0)
+}
 
-let inputURL = URL(fileURLWithPath: (input as NSString).expandingTildeInPath)
-let output = outputPath ?? (inputURL.deletingPathExtension().path + ".pdf")
-let outputURL = URL(fileURLWithPath: (output as NSString).expandingTildeInPath)
-let docTitle = title ?? inputURL.deletingPathExtension().lastPathComponent
+// --setup: interactive selection and exit
+if runSetup {
+    if AppConfig.interactiveSetup() != nil {
+        exit(0)
+    } else {
+        exit(1)
+    }
+}
+
+// Need input files for conversion
+guard !inputPaths.isEmpty else { fputs("Error: No input files\n", stderr); exit(1) }
+
+// Resolve template: flag > config > interactive setup
+guard let templatePath = AppConfig.resolveTemplate(flagValue: templateFlag) else {
+    fputs("Error: No template available. Run: iatemplate2pdf --setup\n", stderr)
+    exit(1)
+}
 
 guard FileManager.default.fileExists(atPath: templatePath) else {
-    fputs("Error: Template not found\n", stderr); exit(1)
+    fputs("Error: Template not found at \(templatePath)\n", stderr)
+    fputs("Run: iatemplate2pdf --setup\n", stderr)
+    exit(1)
 }
 guard let template = TemplateConfig.load(from: templatePath) else {
-    fputs("Error: Invalid template\n", stderr); exit(1)
-}
-guard let contentHTML = markdownToHTML(inputURL.path) else {
-    fputs("Error: Markdown conversion failed\n", stderr); exit(1)
+    fputs("Error: Invalid template at \(templatePath)\n", stderr)
+    exit(1)
 }
 
-let dateFmt = DateFormatter()
-dateFmt.dateFormat = "dd.MM.yyyy"
-let dateStr = dateFmt.string(from: Date())
-
-fputs("Converting: \(inputURL.path)\n", stderr)
-fputs("Template:   \((templatePath as NSString).lastPathComponent)\n", stderr)
+if let dir = outputDir {
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+}
 
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
+let renderer = PDFRenderer()
 
-let pg = PageConfig()
-let tmp = FileManager.default.temporaryDirectory
+var failures = 0
 
-// Step 1: Render body PDF
-fputs("Rendering body...\n", stderr)
-let bodyHTML = buildBodyHTML(content: contentHTML, template: template)
-let bodyPDF = tmp.appendingPathComponent("md2pdf-body.pdf").path
-let bodyOk = renderHTMLToPDF(
-    html: bodyHTML, baseURL: template.resourcesURL, outputPath: bodyPDF,
-    paperSize: NSSize(width: pg.paperWidth, height: pg.paperHeight),
-    margins: NSEdgeInsets(top: pg.marginTop, left: pg.marginLeft, bottom: pg.marginBottom, right: pg.marginRight)
-)
-guard bodyOk else { fputs("Error: Body render failed\n", stderr); exit(1) }
+for inputPathStr in inputPaths {
+    let inputURL = URL(fileURLWithPath: (inputPathStr as NSString).expandingTildeInPath)
 
-guard let bodyDoc = PDFDocument(url: URL(fileURLWithPath: bodyPDF)) else {
-    fputs("Error: Cannot read body PDF\n", stderr); exit(1)
-}
-let pageCount = bodyDoc.pageCount
-fputs("Body: \(pageCount) pages\n", stderr)
-
-// Step 2: Render header (once — same for all pages, kept as vector PDFPage)
-var headerPage: PDFPage? = nil
-if let headerHTML = template.headerHTML(title: docTitle, date: dateStr) {
-    fputs("Rendering header...\n", stderr)
-    let headerPDFPath = tmp.appendingPathComponent("md2pdf-header.pdf").path
-    let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-    let hdrOk = renderHTMLToPDF(
-        html: headerHTML, baseURL: template.resourcesURL, outputPath: headerPDFPath,
-        paperSize: NSSize(width: pg.paperWidth, height: template.headerHeight),
-        margins: zeroMargins
-    )
-    if hdrOk { headerPage = loadPDFPage(from: headerPDFPath) }
-    // Don't delete yet — PDFPage may reference the file
-}
-
-// Step 3: Render footers (one per page, kept as vector PDFPages)
-fputs("Rendering footers...\n", stderr)
-var footerPages: [PDFPage?] = []
-for p in 1...pageCount {
-    if let footerHTML = template.footerHTML(pageNumber: p, pageCount: pageCount) {
-        let footerPDFPath = tmp.appendingPathComponent("md2pdf-footer-\(p).pdf").path
-        let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        let ftrOk = renderHTMLToPDF(
-            html: footerHTML, baseURL: template.resourcesURL, outputPath: footerPDFPath,
-            paperSize: NSSize(width: pg.paperWidth, height: template.footerHeight),
-            margins: zeroMargins
-        )
-        footerPages.append(ftrOk ? loadPDFPage(from: footerPDFPath) : nil)
-    } else {
-        footerPages.append(nil)
+    guard FileManager.default.fileExists(atPath: inputURL.path) else {
+        fputs("Error: File not found: \(inputURL.path)\n", stderr)
+        failures += 1
+        continue
     }
+
+    let outURL: URL
+    if let dir = outputDir {
+        let pdfName = inputURL.deletingPathExtension().lastPathComponent + ".pdf"
+        outURL = URL(fileURLWithPath: dir).appendingPathComponent(pdfName)
+    } else if let op = outputPath, inputPaths.count == 1 {
+        outURL = URL(fileURLWithPath: (op as NSString).expandingTildeInPath)
+    } else {
+        outURL = inputURL.deletingPathExtension().appendingPathExtension("pdf")
+    }
+
+    let docTitle = title ?? inputURL.deletingPathExtension().lastPathComponent
+    fputs("Converting: \(inputURL.lastPathComponent)\n", stderr)
+
+    let ok = convertFile(inputURL: inputURL, outputURL: outURL, template: template, renderer: renderer, docTitle: docTitle, author: author)
+    if !ok { failures += 1 }
 }
 
-// Step 4: Compose final PDF (all vector, no rasterization)
-fputs("Composing...\n", stderr)
-let result = PDFDocument()
-for p in 0..<pageCount {
-    guard let page = bodyDoc.page(at: p) else { continue }
-    let annotated = AnnotatedPDFPage(
-        original: page,
-        header: headerPage,
-        footer: p < footerPages.count ? footerPages[p] : nil,
-        headerH: template.headerHeight,
-        footerH: template.footerHeight
-    )
-    result.insert(annotated, at: result.pageCount)
+if inputPaths.count > 1 {
+    fputs("\nDone: \(inputPaths.count - failures)/\(inputPaths.count) files converted\n", stderr)
 }
 
-let ok = result.write(to: outputURL)
-
-// Clean up temp files after final PDF is written
-try? FileManager.default.removeItem(atPath: bodyPDF)
-let hdrTmp = tmp.appendingPathComponent("md2pdf-header.pdf").path
-try? FileManager.default.removeItem(atPath: hdrTmp)
-for p in 1...pageCount {
-    let ftrTmp = tmp.appendingPathComponent("md2pdf-footer-\(p).pdf").path
-    try? FileManager.default.removeItem(atPath: ftrTmp)
-}
-
-if ok { fputs("PDF saved to: \(outputURL.path)\n", stderr) }
-else { fputs("Error: Write failed\n", stderr) }
-exit(ok ? 0 : 1)
+exit(failures > 0 ? 1 : 0)
