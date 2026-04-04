@@ -5,9 +5,9 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 
 const GREEN = "\x1b[32m";
 const RED = "\x1b[31m";
@@ -22,8 +22,37 @@ function fail(msg, detail) { failed++; console.log(`${RED}✗${NC} ${msg}: ${det
 const tmp = mkdtempSync(join(tmpdir(), "mcp-test-"));
 const serverPath = new URL("./server.js", import.meta.url).pathname;
 
+// Find first available template for tests
+function findFirstTemplate() {
+  const home = homedir();
+  const searchPaths = [
+    join(home, "Library/Containers/pro.writer.mac/Data/Library/Application Support/iA Writer/Templates"),
+    join(home, "Library/Application Support/iA Writer/Templates"),
+    "/Library/Application Support/iA Writer/Templates",
+  ];
+  for (const dir of searchPaths) {
+    let items;
+    try { items = readdirSync(dir); } catch { continue; }
+    for (const item of items) {
+      if (!item.endsWith(".iatemplate")) continue;
+      const fullPath = join(dir, item);
+      if (existsSync(join(fullPath, "Contents/Info.plist"))) return fullPath;
+    }
+  }
+  return null;
+}
+
+const TEST_TEMPLATE = findFirstTemplate();
+const TEST_AUTHOR = "Test Author";
+
+// Backup config before tests, restore after
+const configPath = join(homedir(), ".config", "iatemplate2pdf", "config.json");
+let configBackup = null;
+try { configBackup = readFileSync(configPath, "utf-8"); } catch {}
+
 console.log("");
 console.log("Running MCP tests...");
+if (TEST_TEMPLATE) console.log(`Using template: ${TEST_TEMPLATE}`);
 console.log("");
 
 const transport = new StdioClientTransport({
@@ -47,14 +76,14 @@ try {
     fail("Tool listing", `Found: ${tools.map((t) => t.name).join(", ")}`);
   }
 
-  // Test 3: Convert single file
+  // Test 3: Convert single file (with explicit template + author)
   const mdPath = join(tmp, "test.md");
   const pdfPath = join(tmp, "test.pdf");
   writeFileSync(mdPath, "# Test\n\nHello from MCP.\n");
 
   const result1 = await client.callTool({
     name: "iatemplate2pdf",
-    arguments: { files: [mdPath] },
+    arguments: { files: [mdPath], template: TEST_TEMPLATE, author: TEST_AUTHOR },
   });
   if (existsSync(pdfPath) && statSync(pdfPath).size > 0) {
     pass("Single file conversion via MCP");
@@ -72,7 +101,7 @@ try {
 
   await client.callTool({
     name: "iatemplate2pdf",
-    arguments: { files: [md1, md2], output_dir: outDir },
+    arguments: { files: [md1, md2], output_dir: outDir, template: TEST_TEMPLATE, author: TEST_AUTHOR },
   });
   const pdf1 = join(outDir, "batch1.pdf");
   const pdf2 = join(outDir, "batch2.pdf");
@@ -82,7 +111,23 @@ try {
     fail("Batch conversion", "Not all PDFs created");
   }
 
-  // Test 5: Non-existent file
+  // Test 5: Missing config returns helpful message (not an error)
+  // Temporarily remove config to test the interactive flow
+  try { renameSync(configPath, configPath + ".bak"); } catch {}
+  const noConfigResult = await client.callTool({
+    name: "iatemplate2pdf",
+    arguments: { files: [mdPath] },
+  });
+  const noConfigText = noConfigResult.content?.[0]?.text || "";
+  if (noConfigText.includes("Available templates") || noConfigText.includes("ask the user")) {
+    pass("Missing config returns template list for LLM");
+  } else {
+    fail("Missing config", noConfigText);
+  }
+  // Restore config
+  try { renameSync(configPath + ".bak", configPath); } catch {}
+
+  // Test 6: Non-existent file
   const result3 = await client.callTool({
     name: "iatemplate2pdf",
     arguments: { files: ["/nonexistent/file.md"] },

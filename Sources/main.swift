@@ -38,6 +38,10 @@ struct AppConfig {
     static let configDir = NSString(string: "~/.config/iatemplate2pdf").expandingTildeInPath
     static let configFile = (configDir as NSString).appendingPathComponent("config.json")
 
+    static func systemUserName() -> String {
+        return NSFullUserName().isEmpty ? NSUserName() : NSFullUserName()
+    }
+
     // Directories where iA Writer stores templates
     static let templateSearchPaths: [String] = [
         NSString(string: "~/Library/Containers/pro.writer.mac/Data/Library/Application Support/iA Writer/Templates").expandingTildeInPath,
@@ -65,10 +69,31 @@ struct AppConfig {
         return results.filter { seen.insert($0.0).inserted }
     }
 
-    static func loadDefaultTemplate() -> String? {
+    private static func loadConfig() -> [String: Any]? {
         guard let data = FileManager.default.contents(atPath: configFile),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let path = json["defaultTemplate"] as? String,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    private static func saveConfig(_ config: [String: Any]) {
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: config, options: .prettyPrinted) {
+            fm.createFile(atPath: configFile, contents: data)
+        }
+    }
+
+    private static func updateConfig(key: String, value: Any) {
+        var config = loadConfig() ?? [:]
+        config[key] = value
+        saveConfig(config)
+    }
+
+    static func loadDefaultTemplate() -> String? {
+        guard let config = loadConfig(),
+              let path = config["defaultTemplate"] as? String,
               FileManager.default.fileExists(atPath: path) else {
             return nil
         }
@@ -76,12 +101,36 @@ struct AppConfig {
     }
 
     static func saveDefaultTemplate(_ path: String) {
-        let fm = FileManager.default
-        try? fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
-        let json: [String: Any] = ["defaultTemplate": path]
-        if let data = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
-            fm.createFile(atPath: configFile, contents: data)
+        updateConfig(key: "defaultTemplate", value: path)
+    }
+
+    static func loadAuthor() -> String? {
+        guard let config = loadConfig(),
+              let author = config["author"] as? String, !author.isEmpty else {
+            return nil
         }
+        return author
+    }
+
+    static func saveAuthor(_ name: String) {
+        updateConfig(key: "author", value: name)
+    }
+
+    /// Ask user for author name. Returns author string.
+    static func interactiveAuthorSetup() -> String {
+        let systemName = systemUserName()
+        let current = loadAuthor()
+
+        if let cur = current {
+            fputs("Current author: \(cur)\n", stderr)
+        }
+
+        fputs("Author name [\(systemName)]: ", stderr)
+        let line = readLine()?.trimmingCharacters(in: .whitespaces) ?? ""
+        let author = line.isEmpty ? systemName : line
+        saveAuthor(author)
+        fputs("Author set to: \(author)\n\n", stderr)
+        return author
     }
 
     /// Interactive template selection. Returns chosen template path, or nil if none available.
@@ -109,37 +158,45 @@ struct AppConfig {
             fputs("Only one template found — using \(templates[0].name).\n", stderr)
             saveDefaultTemplate(templates[0].path)
             fputs("Saved as default.\n\n", stderr)
-            return templates[0].path
+        } else {
+            fputs("Choose default template [1-\(templates.count)]: ", stderr)
+            guard let line = readLine(), let choice = Int(line),
+                  choice >= 1, choice <= templates.count else {
+                fputs("Invalid choice.\n", stderr)
+                return nil
+            }
+
+            let selected = templates[choice - 1]
+            saveDefaultTemplate(selected.path)
+            fputs("Default template set to: \(selected.name)\n\n", stderr)
         }
 
-        fputs("Choose default template [1-\(templates.count)]: ", stderr)
-        guard let line = readLine(), let choice = Int(line),
-              choice >= 1, choice <= templates.count else {
-            fputs("Invalid choice.\n", stderr)
-            return nil
-        }
-
-        let selected = templates[choice - 1]
-        saveDefaultTemplate(selected.path)
-        fputs("Default template set to: \(selected.name)\n\n", stderr)
-        return selected.path
+        return loadDefaultTemplate()
     }
 
     /// Resolve template path: --template flag > config > interactive setup
-    static func resolveTemplate(flagValue: String?) -> String? {
-        // Explicit --template flag always wins
-        if let flag = flagValue {
-            return flag
+    static func resolveTemplate(flagValue: String?, nonInteractive: Bool) -> String? {
+        if let flag = flagValue { return flag }
+        if let saved = loadDefaultTemplate() { return saved }
+
+        if nonInteractive {
+            fputs("Error: No default template configured. Run: iatemplate2pdf --setup\n", stderr)
+            return nil
         }
 
-        // Check saved config
-        if let saved = loadDefaultTemplate() {
-            return saved
-        }
-
-        // No config yet — run interactive setup
         fputs("No default template configured.\n", stderr)
         return interactiveSetup()
+    }
+
+    /// Resolve author: --author flag > config > interactive > system username
+    static func resolveAuthor(flagValue: String?, nonInteractive: Bool) -> String {
+        if let flag = flagValue { return flag }
+        if let saved = loadAuthor() { return saved }
+
+        if nonInteractive { return systemUserName() }
+
+        fputs("No author configured.\n", stderr)
+        return interactiveAuthorSetup()
     }
 }
 
@@ -256,6 +313,20 @@ struct PageConfig {
     let marginBottom: CGFloat = 90
     let marginLeft: CGFloat = 0
     let marginRight: CGFloat = 0
+}
+
+// MARK: - Extract first H1 from Markdown
+
+func extractFirstH1(_ path: String) -> String? {
+    guard let data = FileManager.default.contents(atPath: path),
+          let text = String(data: data, encoding: .utf8) else { return nil }
+    for line in text.components(separatedBy: .newlines) {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("# ") {
+            return String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        }
+    }
+    return nil
 }
 
 // MARK: - Build body HTML
@@ -415,7 +486,8 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
     }
 
     let dateFmt = DateFormatter()
-    dateFmt.dateFormat = "dd.MM.yyyy"
+    dateFmt.dateStyle = .medium
+    dateFmt.locale = Locale.current
     let dateStr = dateFmt.string(from: Date())
 
     fputs("  Rendering body...\n", stderr)
@@ -436,9 +508,12 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
     let pageCount = bodyDoc.pageCount
     fputs("  Body: \(pageCount) pages\n", stderr)
 
+    var tempFiles = [bodyPDF]
+
     var headerPage: PDFPage? = nil
     if let headerHTML = template.headerHTML(title: docTitle, date: dateStr) {
         let headerPDFPath = tmp.appendingPathComponent("md2pdf-header-\(UUID().uuidString).pdf").path
+        tempFiles.append(headerPDFPath)
         let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         let hdrOk = renderer.render(
             html: headerHTML, baseURL: template.resourcesURL, outputPath: headerPDFPath,
@@ -452,6 +527,7 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
     for p in 1...pageCount {
         if let footerHTML = template.footerHTML(pageNumber: p, pageCount: pageCount) {
             let footerPDFPath = tmp.appendingPathComponent("md2pdf-footer-\(UUID().uuidString).pdf").path
+            tempFiles.append(footerPDFPath)
             let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
             let ftrOk = renderer.render(
                 html: footerHTML, baseURL: template.resourcesURL, outputPath: footerPDFPath,
@@ -477,13 +553,59 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
         result.insert(annotated, at: result.pageCount)
     }
 
-    let ok = result.write(to: outputURL)
-    if ok { fputs("  → \(outputURL.path)\n", stderr) }
-    else { fputs("  Error: Write failed\n", stderr) }
+    // Write PDF to temp file first, then re-write with metadata via CGPDFContext
+    // (PDFDocument.documentAttributes misencodes titles starting with '/')
+    let tmpPDF = tmp.appendingPathComponent("md2pdf-result-\(UUID().uuidString).pdf").path
+    tempFiles.append(tmpPDF)
+    guard result.write(to: URL(fileURLWithPath: tmpPDF)) else {
+        fputs("  Error: Write failed\n", stderr)
+        return false
+    }
 
-    try? FileManager.default.removeItem(atPath: bodyPDF)
+    let ok = writePDFWithMetadata(
+        inputPath: tmpPDF, outputURL: outputURL,
+        title: docTitle, author: author
+    )
+    if ok { fputs("  → \(outputURL.path)\n", stderr) }
+    else { fputs("  Error: Metadata write failed\n", stderr) }
+
+    // Clean up temp files and retained PDF documents
+    for path in tempFiles {
+        try? FileManager.default.removeItem(atPath: path)
+    }
+    retainedDocs.removeAll()
 
     return ok
+}
+
+// MARK: - Write PDF with correct metadata via CGPDFContext
+
+func writePDFWithMetadata(inputPath: String, outputURL: URL, title: String, author: String) -> Bool {
+    guard let inputDoc = CGPDFDocument(URL(fileURLWithPath: inputPath) as CFURL) else { return false }
+
+    // Prefix title with a zero-width space if it starts with '/' to work around
+    // a CoreGraphics bug where '/' triggers PDF Name Object encoding instead of string
+    let safeTitle = title.hasPrefix("/") ? "\u{200B}\(title)" : title
+
+    let auxInfo: [CFString: Any] = [
+        kCGPDFContextTitle: safeTitle as CFString,
+        kCGPDFContextAuthor: author as CFString,
+    ]
+
+    guard let consumer = CGDataConsumer(url: outputURL as CFURL) else { return false }
+    var firstPageBox = inputDoc.page(at: 1)?.getBoxRect(.mediaBox) ?? CGRect(x: 0, y: 0, width: 595, height: 842)
+    guard let ctx = CGContext(consumer: consumer, mediaBox: &firstPageBox, auxInfo as CFDictionary) else { return false }
+
+    for i in 1...inputDoc.numberOfPages {
+        guard let page = inputDoc.page(at: i) else { continue }
+        var pageBox = page.getBoxRect(.mediaBox)
+        ctx.beginPage(mediaBox: &pageBox)
+        ctx.drawPDFPage(page)
+        ctx.endPage()
+    }
+
+    ctx.closePDF()
+    return true
 }
 
 // MARK: - CLI
@@ -494,18 +616,19 @@ func printUsage() {
 
     Options:
       --template <path>     Path to .iatemplate bundle
-      --title <text>        Document title (default: filename)
-      --author <text>       Author name (default: "Martin Schwenzer")
+      --title <text>        Document title (single file only; default: first H1)
+      --author <text>       Author name (default: saved config or system user)
       --output-dir <path>   Output directory for batch conversion
-      --setup               Choose default template interactively
+      --setup               Configure default template and author
       --list-templates      List available iA Writer templates
+      --non-interactive     Never prompt for input (for scripts/MCP)
       --help, -h            Show this help
 
     Examples:
       iatemplate2pdf doc.md                          # Single file
       iatemplate2pdf doc.md output.pdf               # Single file with output path
       iatemplate2pdf *.md --output-dir ./export/     # Batch conversion
-      iatemplate2pdf --setup                         # Choose default template
+      iatemplate2pdf --setup                         # Configure template & author
 
     """, stderr)
 }
@@ -519,23 +642,30 @@ var inputPaths: [String] = []
 var outputPath: String?
 var outputDir: String?
 var templateFlag: String?
-var title: String?
-var author = "Martin Schwenzer"
+var titleFlag: String?
+var authorFlag: String?
 var runSetup = false
 var listTemplates = false
+var nonInteractive = false
 
 var idx = 0
 while idx < args.count {
     switch args[idx] {
     case "--template":        idx += 1; if idx < args.count { templateFlag = args[idx] }
-    case "--title":           idx += 1; if idx < args.count { title = args[idx] }
-    case "--author":          idx += 1; if idx < args.count { author = args[idx] }
+    case "--title":           idx += 1; if idx < args.count { titleFlag = args[idx] }
+    case "--author":          idx += 1; if idx < args.count { authorFlag = args[idx] }
     case "--output-dir":      idx += 1; if idx < args.count { outputDir = args[idx] }
     case "--setup":           runSetup = true
     case "--list-templates":  listTemplates = true
+    case "--non-interactive": nonInteractive = true
     case "--help", "-h":      printUsage(); exit(0)
     default:
         let arg = args[idx]
+        if arg.hasPrefix("--") {
+            fputs("Error: Unknown option: \(arg)\n", stderr)
+            printUsage()
+            exit(1)
+        }
         if arg.hasSuffix(".pdf") && outputDir == nil && inputPaths.count == 1 {
             outputPath = arg
         } else {
@@ -543,6 +673,11 @@ while idx < args.count {
         }
     }
     idx += 1
+}
+
+// Auto-detect non-interactive mode when stdin is not a terminal
+if isatty(STDIN_FILENO) == 0 {
+    nonInteractive = true
 }
 
 // --list-templates: show and exit
@@ -562,20 +697,18 @@ if listTemplates {
     exit(0)
 }
 
-// --setup: interactive selection and exit
+// --setup: interactive configuration
 if runSetup {
-    if AppConfig.interactiveSetup() != nil {
-        exit(0)
-    } else {
-        exit(1)
-    }
+    guard let _ = AppConfig.interactiveSetup() else { exit(1) }
+    _ = AppConfig.interactiveAuthorSetup()
+    exit(0)
 }
 
 // Need input files for conversion
 guard !inputPaths.isEmpty else { fputs("Error: No input files\n", stderr); exit(1) }
 
-// Resolve template: flag > config > interactive setup
-guard let templatePath = AppConfig.resolveTemplate(flagValue: templateFlag) else {
+// Resolve template and author
+guard let templatePath = AppConfig.resolveTemplate(flagValue: templateFlag, nonInteractive: nonInteractive) else {
     fputs("Error: No template available. Run: iatemplate2pdf --setup\n", stderr)
     exit(1)
 }
@@ -589,6 +722,8 @@ guard let template = TemplateConfig.load(from: templatePath) else {
     fputs("Error: Invalid template at \(templatePath)\n", stderr)
     exit(1)
 }
+
+let author = AppConfig.resolveAuthor(flagValue: authorFlag, nonInteractive: nonInteractive)
 
 if let dir = outputDir {
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -619,7 +754,12 @@ for inputPathStr in inputPaths {
         outURL = inputURL.deletingPathExtension().appendingPathExtension("pdf")
     }
 
-    let docTitle = title ?? inputURL.deletingPathExtension().lastPathComponent
+    let docTitle: String
+    if let flag = titleFlag, inputPaths.count == 1 {
+        docTitle = flag
+    } else {
+        docTitle = extractFirstH1(inputURL.path) ?? inputURL.deletingPathExtension().lastPathComponent
+    }
     fputs("Converting: \(inputURL.lastPathComponent)\n", stderr)
 
     let ok = convertFile(inputURL: inputURL, outputURL: outURL, template: template, renderer: renderer, docTitle: docTitle, author: author)

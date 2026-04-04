@@ -37,7 +37,7 @@ sudo mv iatemplate2pdf /usr/local/bin/
 
 ## Setup
 
-On first use, iatemplate2pdf will detect installed iA Writer templates and ask you to choose a default:
+On first use, iatemplate2pdf will detect installed iA Writer templates and ask you to choose a default template and set your author name:
 
 ```
 No default template configured.
@@ -50,12 +50,15 @@ Available templates:
 
 Choose default template [1-3]: 2
 Default template set to: DERHAEUPTLING
+
+Author name [Martin Schwenzer]: Martin Schwenzer
+Author set to: Martin Schwenzer
 ```
 
 You can change this anytime:
 
 ```bash
-iatemplate2pdf --setup               # Choose interactively
+iatemplate2pdf --setup               # Configure template & author
 iatemplate2pdf --list-templates       # Show available templates
 ```
 
@@ -73,7 +76,7 @@ iatemplate2pdf doc.md output.pdf
 # Use a different template (one-off)
 iatemplate2pdf doc.md --template ~/path/to/Custom.iatemplate
 
-# Set title and author (used in header)
+# Override title and author for a single conversion
 iatemplate2pdf doc.md --title "My Document" --author "Jane Doe"
 
 # Batch conversion
@@ -82,14 +85,15 @@ iatemplate2pdf *.md --output-dir ./export/
 
 ### Options
 
-| Flag                  | Description                           | Default            |
-| --------------------- | ------------------------------------- | ------------------ |
-| `--template <path>`   | Path to `.iatemplate` bundle          | Saved default      |
-| `--title <text>`      | Document title                        | Filename           |
-| `--author <text>`     | Author name                           | "Martin Schwenzer" |
-| `--output-dir <path>` | Output directory for batch conversion | —                  |
-| `--setup`             | Choose default template interactively | —                  |
-| `--list-templates`    | Show available templates              | —                  |
+| Flag                  | Description                           | Default                    |
+| --------------------- | ------------------------------------- | -------------------------- |
+| `--template <path>`   | Path to `.iatemplate` bundle          | Saved config               |
+| `--title <text>`      | Document title (single file only)     | First H1 heading           |
+| `--author <text>`     | Author name                           | Saved config / system user |
+| `--output-dir <path>` | Output directory for batch conversion | —                          |
+| `--setup`             | Configure default template and author | —                          |
+| `--list-templates`    | Show available templates              | —                          |
+| `--non-interactive`   | Never prompt for input (scripts/MCP)  | Auto-detected via TTY      |
 
 ## MCP Server
 
@@ -110,8 +114,10 @@ Parameters:
 - `files` (required): Array of absolute paths to `.md` files
 - `output_dir` (optional): Output directory for PDFs
 - `template` (optional): Path to `.iatemplate` bundle
-- `title` (optional): Document title (single file only)
+- `title` (optional): Document title (single file only; default: first H1)
 - `author` (optional): Author name
+
+If `template` or `author` are not provided and not configured, the MCP server returns a helpful message listing available templates or asking for the author name — so the LLM can ask the user and call again with the correct parameters.
 
 ## How it works
 
@@ -140,6 +146,10 @@ iatemplate2pdf reads `Info.plist` for configuration, inlines all CSS and SVG res
 # MCP tests
 node mcp/test.js
 ```
+
+## Planned Features
+
+- **Configurable paper size:** Currently hardcoded to A4 (595.28 × 841.89 pt). Could support US Letter, Legal, etc. via `--paper-size` flag and `config.json` default.
 
 ## Author
 

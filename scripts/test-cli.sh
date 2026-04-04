@@ -205,7 +205,8 @@ if [[ -f "$CONFIG_DIR/config.json" ]]; then
 fi
 # Remove config to trigger setup
 rm -f "$CONFIG_DIR/config.json" 2>/dev/null
-if echo "1" | $BINARY --setup 2>&1 | grep -q "Default template set to:"; then
+SETUP_OUTPUT=$(printf "1\nTest Author\n" | $BINARY --setup 2>&1)
+if echo "$SETUP_OUTPUT" | grep -q "Author set to:"; then
   if [[ -f "$CONFIG_DIR/config.json" ]]; then
     pass "--setup saves config"
   else
@@ -215,6 +216,25 @@ else
   fail "--setup" "Setup did not complete"
 fi
 # Restore original config
+if [[ -f "$CONFIG_BAK" ]]; then
+  cp "$CONFIG_BAK" "$CONFIG_DIR/config.json"
+fi
+
+# Test 13: Unknown flag rejected
+if $BINARY --unknown-flag 2>/dev/null; then
+  fail "Unknown flag" "Should have failed"
+else
+  pass "Unknown flag rejected"
+fi
+
+# Test 14: --non-interactive fails without config
+rm -f "$CONFIG_DIR/config.json" 2>/dev/null
+if $BINARY --non-interactive "$TMPDIR/simple.md" 2>/dev/null; then
+  fail "--non-interactive without config" "Should have failed"
+else
+  pass "--non-interactive fails without config"
+fi
+# Restore config
 if [[ -f "$CONFIG_BAK" ]]; then
   cp "$CONFIG_BAK" "$CONFIG_DIR/config.json"
 fi
