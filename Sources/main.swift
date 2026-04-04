@@ -318,7 +318,8 @@ private class NavDelegate: NSObject, WKNavigationDelegate {
     var onDone: ((Bool) -> Void)?
 
     func webView(_ wv: WKWebView, didFinish navigation: WKNavigation!) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        // Wait for WebKit layout completion via requestAnimationFrame
+        wv.evaluateJavaScript("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))") { _, _ in
             let pi = NSPrintInfo()
             pi.paperSize = self.paperSize
             pi.topMargin = self.margins.top
