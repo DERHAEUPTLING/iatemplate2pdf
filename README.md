@@ -21,9 +21,9 @@ Markdown to PDF using [iA Writer templates](https://github.com/iainc/iA-Writer-T
 ```bash
 git clone https://github.com/DERHAEUPTLING/iatemplate2pdf.git
 cd iatemplate2pdf
-swift build -c release
-# Optionally copy to PATH:
-cp .build/release/iatemplate2pdf /usr/local/bin/
+swift build
+# Symlink into PATH (survives rebuilds):
+sudo ln -sf "$(pwd)/.build/debug/iatemplate2pdf" /usr/local/bin/iatemplate2pdf
 ```
 
 ### From GitHub Release
