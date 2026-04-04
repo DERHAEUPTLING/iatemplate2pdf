@@ -4,11 +4,18 @@ import PDFKit
 import cmark
 import CMarkBridge
 
+// MARK: - Helpers
+
+extension String {
+    func appendingPath(_ component: String) -> String {
+        (self as NSString).appendingPathComponent(component)
+    }
+}
+
 // MARK: - Markdown → HTML (statically linked cmark-gfm, no external dependency)
 
-func markdownToHTML(_ path: String) -> String? {
-    guard let data = FileManager.default.contents(atPath: path),
-          let md = String(data: data, encoding: .utf8) else { return nil }
+func markdownToHTML(_ markdown: String) -> String? {
+    let md = markdown
 
     cmark_gfm_core_extensions_ensure_registered()
 
@@ -36,7 +43,7 @@ func markdownToHTML(_ path: String) -> String? {
 
 struct AppConfig {
     static let configDir = NSString(string: "~/.config/iatemplate2pdf").expandingTildeInPath
-    static let configFile = (configDir as NSString).appendingPathComponent("config.json")
+    static let configFile = configDir.appendingPath("config.json")
 
     static func systemUserName() -> String {
         return NSFullUserName().isEmpty ? NSUserName() : NSFullUserName()
@@ -55,10 +62,10 @@ struct AppConfig {
         for dir in templateSearchPaths {
             guard let items = try? fm.contentsOfDirectory(atPath: dir) else { continue }
             for item in items where item.hasSuffix(".iatemplate") {
-                let fullPath = (dir as NSString).appendingPathComponent(item)
+                let fullPath = dir.appendingPath(item)
                 let name = (item as NSString).deletingPathExtension
                 // Verify it's a valid template (has Info.plist)
-                let plist = (fullPath as NSString).appendingPathComponent("Contents/Info.plist")
+                let plist = fullPath.appendingPath("Contents/Info.plist")
                 if fm.fileExists(atPath: plist) {
                     results.append((name, fullPath))
                 }
@@ -209,11 +216,11 @@ struct TemplateConfig {
     let headerFile: String?
     let footerFile: String?
 
-    var resourcesDir: String { (templateDir as NSString).appendingPathComponent("Contents/Resources") }
+    var resourcesDir: String { templateDir.appendingPath("Contents/Resources") }
     var resourcesURL: URL { URL(fileURLWithPath: resourcesDir) }
 
     static func load(from dir: String) -> TemplateConfig? {
-        let plistPath = (dir as NSString).appendingPathComponent("Contents/Info.plist")
+        let plistPath = dir.appendingPath("Contents/Info.plist")
         guard let data = FileManager.default.contents(atPath: plistPath),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             return nil
@@ -228,7 +235,7 @@ struct TemplateConfig {
     }
 
     func readResource(_ name: String) -> String? {
-        let path = (resourcesDir as NSString).appendingPathComponent(name)
+        let path = resourcesDir.appendingPath(name)
         return try? String(contentsOfFile: path, encoding: .utf8)
     }
 
@@ -238,16 +245,22 @@ struct TemplateConfig {
             .joined(separator: "\n")
     }
 
+    // Pre-compiled regex patterns (compiled once, reused across calls)
+    private static let commentRegex = try! NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [])
+    private static let cssRegex = try! NSRegularExpression(pattern: #"<link[^>]+href="([^"]+\.css)"[^>]*/?\s*>"#)
+    private static let imgRegex = try! NSRegularExpression(pattern: #"<img\s+src="([^"]+\.svg)"([^>]*)>"#)
+    private static let widthRegex = try! NSRegularExpression(pattern: #"width="([^"]+)""#)
+    private static let heightRegex = try! NSRegularExpression(pattern: #"height="([^"]+)""#)
+    private static let classRegex = try! NSRegularExpression(pattern: #"class="([^"]+)""#)
+
     /// Inline all external resources (<link href="...css">, <img src="...svg">) so
     /// WKWebView can render them in print mode without file access issues.
     func inlineResources(in html: String) -> String {
         // Strip HTML comments first to avoid inlining commented-out resources
-        let commentPattern = try! NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [])
-        var result = commentPattern.stringByReplacingMatches(in: html, range: NSRange(html.startIndex..., in: html), withTemplate: "")
+        var result = Self.commentRegex.stringByReplacingMatches(in: html, range: NSRange(html.startIndex..., in: html), withTemplate: "")
 
         // Inline CSS: <link ... href="X.css" ... /> → <style>...</style>
-        let cssPattern = try! NSRegularExpression(pattern: #"<link[^>]+href="([^"]+\.css)"[^>]*/?\s*>"#)
-        for match in cssPattern.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
+        for match in Self.cssRegex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
             let fullRange = Range(match.range, in: result)!
             let fileRange = Range(match.range(at: 1), in: result)!
             let filename = String(result[fileRange])
@@ -257,8 +270,7 @@ struct TemplateConfig {
         }
 
         // Inline SVG: <img src="X.svg" width="W" height="H" class="C" ...> → inline SVG
-        let imgPattern = try! NSRegularExpression(pattern: #"<img\s+src="([^"]+\.svg)"([^>]*)>"#)
-        for match in imgPattern.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
+        for match in Self.imgRegex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed() {
             let fullRange = Range(match.range, in: result)!
             let filenameRange = Range(match.range(at: 1), in: result)!
             let attrsRange = Range(match.range(at: 2), in: result)!
@@ -267,13 +279,12 @@ struct TemplateConfig {
 
             if var svg = readResource(filename) {
                 var extra = ""
-                let patterns: [(String, String)] = [
-                    (#"width="([^"]+)""#, "width"),
-                    (#"height="([^"]+)""#, "height"),
-                    (#"class="([^"]+)""#, "class"),
+                let attrRegexes: [(NSRegularExpression, String)] = [
+                    (Self.widthRegex, "width"),
+                    (Self.heightRegex, "height"),
+                    (Self.classRegex, "class"),
                 ]
-                for (pat, attr) in patterns {
-                    let re = try! NSRegularExpression(pattern: pat)
+                for (re, attr) in attrRegexes {
                     if let m = re.firstMatch(in: attrs, range: NSRange(attrs.startIndex..., in: attrs)) {
                         let val = String(attrs[Range(m.range(at: 1), in: attrs)!])
                         extra += " \(attr)=\"\(val)\""
@@ -306,20 +317,18 @@ struct TemplateConfig {
     }
 }
 
-struct PageConfig {
-    let paperWidth: CGFloat = 595.28
-    let paperHeight: CGFloat = 841.89
-    let marginTop: CGFloat = 90
-    let marginBottom: CGFloat = 90
-    let marginLeft: CGFloat = 0
-    let marginRight: CGFloat = 0
+enum PageConfig {
+    static let paperWidth: CGFloat = 595.28
+    static let paperHeight: CGFloat = 841.89
+    static let marginTop: CGFloat = 90
+    static let marginBottom: CGFloat = 90
+    static let marginLeft: CGFloat = 0
+    static let marginRight: CGFloat = 0
 }
 
 // MARK: - Extract first H1 from Markdown
 
-func extractFirstH1(_ path: String) -> String? {
-    guard let data = FileManager.default.contents(atPath: path),
-          let text = String(data: data, encoding: .utf8) else { return nil }
+func extractFirstH1(from text: String) -> String? {
     for line in text.components(separatedBy: .newlines) {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("# ") {
@@ -327,6 +336,11 @@ func extractFirstH1(_ path: String) -> String? {
         }
     }
     return nil
+}
+
+func readFile(_ path: String) -> String? {
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    return String(data: data, encoding: .utf8)
 }
 
 // MARK: - Build body HTML
@@ -420,12 +434,10 @@ private class NavDelegate: NSObject, WKNavigationDelegate {
 
 // MARK: - Load first page of a PDF file (keeps vector data)
 
-var retainedDocs: [PDFDocument] = []
-
-func loadPDFPage(from path: String) -> PDFPage? {
+func loadPDFPage(from path: String, retainIn docs: inout [PDFDocument]) -> PDFPage? {
     guard let doc = PDFDocument(url: URL(fileURLWithPath: path)),
           let page = doc.page(at: 0) else { return nil }
-    retainedDocs.append(doc)
+    docs.append(doc)
     return page
 }
 
@@ -479,8 +491,8 @@ class AnnotatedPDFPage: PDFPage {
 
 // MARK: - Convert a single Markdown file to PDF
 
-func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, renderer: PDFRenderer, docTitle: String, author: String) -> Bool {
-    guard let contentHTML = markdownToHTML(inputURL.path) else {
+func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, renderer: PDFRenderer, markdown: String, docTitle: String, author: String) -> Bool {
+    guard let contentHTML = markdownToHTML(markdown) else {
         fputs("Error: Markdown conversion failed for \(inputURL.lastPathComponent)\n", stderr)
         return false
     }
@@ -491,14 +503,14 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
     let dateStr = dateFmt.string(from: Date())
 
     fputs("  Rendering body...\n", stderr)
-    let pg = PageConfig()
+
     let tmp = FileManager.default.temporaryDirectory
     let bodyPDF = tmp.appendingPathComponent("md2pdf-body-\(UUID().uuidString).pdf").path
     let bodyHTML = buildBodyHTML(content: contentHTML, template: template)
     let bodyOk = renderer.render(
         html: bodyHTML, baseURL: template.resourcesURL, outputPath: bodyPDF,
-        paperSize: NSSize(width: pg.paperWidth, height: pg.paperHeight),
-        margins: NSEdgeInsets(top: pg.marginTop, left: pg.marginLeft, bottom: pg.marginBottom, right: pg.marginRight)
+        paperSize: NSSize(width: PageConfig.paperWidth, height: PageConfig.paperHeight),
+        margins: NSEdgeInsets(top: PageConfig.marginTop, left: PageConfig.marginLeft, bottom: PageConfig.marginBottom, right: PageConfig.marginRight)
     )
     guard bodyOk else { fputs("  Error: Body render failed\n", stderr); return false }
 
@@ -509,6 +521,7 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
     fputs("  Body: \(pageCount) pages\n", stderr)
 
     var tempFiles = [bodyPDF]
+    var retainedDocs: [PDFDocument] = []
 
     var headerPage: PDFPage? = nil
     if let headerHTML = template.headerHTML(title: docTitle, date: dateStr) {
@@ -517,10 +530,10 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
         let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         let hdrOk = renderer.render(
             html: headerHTML, baseURL: template.resourcesURL, outputPath: headerPDFPath,
-            paperSize: NSSize(width: pg.paperWidth, height: template.headerHeight),
+            paperSize: NSSize(width: PageConfig.paperWidth, height: template.headerHeight),
             margins: zeroMargins
         )
-        if hdrOk { headerPage = loadPDFPage(from: headerPDFPath) }
+        if hdrOk { headerPage = loadPDFPage(from: headerPDFPath, retainIn: &retainedDocs) }
     }
 
     var footerPages: [PDFPage?] = []
@@ -531,10 +544,10 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
             let zeroMargins = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
             let ftrOk = renderer.render(
                 html: footerHTML, baseURL: template.resourcesURL, outputPath: footerPDFPath,
-                paperSize: NSSize(width: pg.paperWidth, height: template.footerHeight),
+                paperSize: NSSize(width: PageConfig.paperWidth, height: template.footerHeight),
                 margins: zeroMargins
             )
-            footerPages.append(ftrOk ? loadPDFPage(from: footerPDFPath) : nil)
+            footerPages.append(ftrOk ? loadPDFPage(from: footerPDFPath, retainIn: &retainedDocs) : nil)
         } else {
             footerPages.append(nil)
         }
@@ -573,7 +586,6 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
     for path in tempFiles {
         try? FileManager.default.removeItem(atPath: path)
     }
-    retainedDocs.removeAll()
 
     return ok
 }
@@ -651,10 +663,18 @@ var nonInteractive = false
 var idx = 0
 while idx < args.count {
     switch args[idx] {
-    case "--template":        idx += 1; if idx < args.count { templateFlag = args[idx] }
-    case "--title":           idx += 1; if idx < args.count { titleFlag = args[idx] }
-    case "--author":          idx += 1; if idx < args.count { authorFlag = args[idx] }
-    case "--output-dir":      idx += 1; if idx < args.count { outputDir = args[idx] }
+    case "--template":
+        idx += 1; guard idx < args.count else { fputs("Error: --template requires a value\n", stderr); exit(1) }
+        templateFlag = args[idx]
+    case "--title":
+        idx += 1; guard idx < args.count else { fputs("Error: --title requires a value\n", stderr); exit(1) }
+        titleFlag = args[idx]
+    case "--author":
+        idx += 1; guard idx < args.count else { fputs("Error: --author requires a value\n", stderr); exit(1) }
+        authorFlag = args[idx]
+    case "--output-dir":
+        idx += 1; guard idx < args.count else { fputs("Error: --output-dir requires a value\n", stderr); exit(1) }
+        outputDir = args[idx]
     case "--setup":           runSetup = true
     case "--list-templates":  listTemplates = true
     case "--non-interactive": nonInteractive = true
@@ -738,8 +758,8 @@ var failures = 0
 for inputPathStr in inputPaths {
     let inputURL = URL(fileURLWithPath: (inputPathStr as NSString).expandingTildeInPath)
 
-    guard FileManager.default.fileExists(atPath: inputURL.path) else {
-        fputs("Error: File not found: \(inputURL.path)\n", stderr)
+    guard let markdown = readFile(inputURL.path) else {
+        fputs("Error: Cannot read file: \(inputURL.path)\n", stderr)
         failures += 1
         continue
     }
@@ -758,11 +778,11 @@ for inputPathStr in inputPaths {
     if let flag = titleFlag, inputPaths.count == 1 {
         docTitle = flag
     } else {
-        docTitle = extractFirstH1(inputURL.path) ?? inputURL.deletingPathExtension().lastPathComponent
+        docTitle = extractFirstH1(from: markdown) ?? inputURL.deletingPathExtension().lastPathComponent
     }
     fputs("Converting: \(inputURL.lastPathComponent)\n", stderr)
 
-    let ok = convertFile(inputURL: inputURL, outputURL: outURL, template: template, renderer: renderer, docTitle: docTitle, author: author)
+    let ok = convertFile(inputURL: inputURL, outputURL: outURL, template: template, renderer: renderer, markdown: markdown, docTitle: docTitle, author: author)
     if !ok { failures += 1 }
 }
 
