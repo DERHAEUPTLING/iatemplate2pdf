@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-BINARY=".build/release/iatemplate2pdf"
+BINARY=".build/debug/iatemplate2pdf"
 TMPDIR=$(mktemp -d)
 PASSED=0
 FAILED=0
@@ -27,7 +27,7 @@ if [[ "${1:-}" == "--build" ]]; then
 fi
 
 if [[ ! -x "$BINARY" ]]; then
-  echo "Binary not found. Run: swift build -c release"
+  echo "Binary not found. Run: swift build"
   exit 1
 fi
 

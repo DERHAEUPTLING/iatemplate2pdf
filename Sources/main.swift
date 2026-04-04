@@ -636,6 +636,9 @@ func printUsage() {
       --non-interactive     Never prompt for input (for scripts/MCP)
       --help, -h            Show this help
 
+    Subcommands:
+      mcp-server            Run as MCP server (stdin/stdout JSON-RPC)
+
     Examples:
       iatemplate2pdf doc.md                          # Single file
       iatemplate2pdf doc.md output.pdf               # Single file with output path
@@ -649,6 +652,16 @@ var args = CommandLine.arguments; args.removeFirst()
 
 // Handle --help with no args
 if args.isEmpty { printUsage(); exit(1) }
+
+// MCP server mode
+if args.first == "mcp-server" {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    Task {
+        await startMCPServer()
+    }
+    RunLoop.main.run()
+}
 
 var inputPaths: [String] = []
 var outputPath: String?

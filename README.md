@@ -97,12 +97,12 @@ iatemplate2pdf *.md --output-dir ./export/
 
 ## MCP Server
 
-iatemplate2pdf includes an MCP server for use with Claude Code and other MCP clients.
+iatemplate2pdf includes a native MCP server — no Node.js required. The same binary handles both CLI and MCP modes.
 
 ### Register globally in Claude Code
 
 ```bash
-claude mcp add --scope user iatemplate2pdf -- node /path/to/iatemplate2pdf/mcp/server.js
+claude mcp add --scope user iatemplate2pdf -- iatemplate2pdf mcp-server
 ```
 
 ### MCP Tool
@@ -140,11 +140,13 @@ iatemplate2pdf reads `Info.plist` for configuration, inlines all CSS and SVG res
 ## Tests
 
 ```bash
+swift build
+
 # CLI tests
 ./scripts/test-cli.sh
 
-# MCP tests
-node mcp/test.js
+# MCP server tests
+./scripts/test-mcp.sh
 ```
 
 ## Planned Features

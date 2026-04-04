@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v13)],
     dependencies: [
         .package(url: "https://github.com/brokenhandsio/cmark-gfm.git", from: "2.0.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.11.0"),
     ],
     targets: [
         .target(
@@ -20,10 +21,12 @@ let package = Package(
             name: "iatemplate2pdf",
             dependencies: [
                 .product(name: "cmark", package: "cmark-gfm"),
+                .product(name: "MCP", package: "swift-sdk"),
                 "CMarkBridge",
             ],
             path: "Sources",
-            exclude: ["CMarkBridge"]
+            exclude: ["CMarkBridge"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
 )
