@@ -16,7 +16,18 @@ Markdown to PDF using [iA Writer templates](https://github.com/iainc/iA-Writer-T
 
 ## Install
 
-### From source (recommended)
+### From GitHub Release (recommended)
+
+Download the universal binary (arm64 + x86_64) from [Releases](https://github.com/DERHAEUPTLING/iatemplate2pdf/releases):
+
+```bash
+curl -sL https://github.com/DERHAEUPTLING/iatemplate2pdf/releases/latest/download/iatemplate2pdf-macos-universal.tar.gz | tar xz
+sudo mv iatemplate2pdf /usr/local/bin/
+```
+
+### From source
+
+Requires Swift 6+ (ships with Xcode 16+). Compiles the binary locally:
 
 ```bash
 git clone https://github.com/DERHAEUPTLING/iatemplate2pdf.git
@@ -24,15 +35,6 @@ cd iatemplate2pdf
 swift build
 # Symlink into PATH (survives rebuilds):
 sudo ln -sf "$(pwd)/.build/debug/iatemplate2pdf" /usr/local/bin/iatemplate2pdf
-```
-
-### From GitHub Release
-
-Download the universal binary (arm64 + x86_64) from [Releases](https://github.com/DERHAEUPTLING/iatemplate2pdf/releases):
-
-```bash
-curl -sL https://github.com/DERHAEUPTLING/iatemplate2pdf/releases/latest/download/iatemplate2pdf-macos-universal.tar.gz | tar xz
-sudo mv iatemplate2pdf /usr/local/bin/
 ```
 
 ## Setup
