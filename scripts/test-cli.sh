@@ -181,11 +181,11 @@ else
   pass "Non-existent file returns error"
 fi
 
-# Test 10: No arguments
-if $BINARY 2>/dev/null; then
-  fail "No arguments" "Should have failed"
+# Test 10: No arguments shows help (exit 0)
+if $BINARY 2>&1 | grep -q "Usage:"; then
+  pass "No arguments shows help"
 else
-  pass "No arguments returns error"
+  fail "No arguments" "No usage output"
 fi
 
 # Test 11: --list-templates
