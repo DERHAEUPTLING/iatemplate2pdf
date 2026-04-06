@@ -651,7 +651,7 @@ func printUsage() {
 var args = CommandLine.arguments; args.removeFirst()
 
 // Handle --help with no args
-if args.isEmpty { printUsage(); exit(1) }
+if args.isEmpty { printUsage(); exit(0) }
 
 // MCP server mode
 if args.first == "mcp-server" {
