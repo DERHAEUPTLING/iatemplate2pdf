@@ -107,7 +107,7 @@ iatemplate2pdf includes a native MCP server — no Node.js required. The same bi
 claude mcp add --scope user iatemplate2pdf -- iatemplate2pdf mcp-server
 ```
 
-### MCP Tool
+### MCP Tools
 
 **`iatemplate2pdf`** — Convert Markdown files to PDF
 
@@ -120,6 +120,19 @@ Parameters:
 - `author` (optional): Author name
 
 If `template` or `author` are not provided and not configured, the MCP server returns a helpful message listing available templates or asking for the author name — so the LLM can ask the user and call again with the correct parameters.
+
+**`list_templates`** — List available iA Writer templates and current configuration
+
+No parameters. Returns all detected `.iatemplate` bundles plus the currently configured default template and author. Useful for discovering available templates before calling `set_defaults`.
+
+**`set_defaults`** — Persist default template and/or author
+
+Parameters (at least one required):
+
+- `template` (optional): Template name (e.g. `"Helvetica"`) or absolute path to a `.iatemplate` bundle
+- `author` (optional): Author name
+
+Equivalent to the CLI `--setup` command, but callable from MCP. Lets MCP hosts (Claude Code, etc.) bootstrap the configuration end-to-end without dropping to a terminal. Saves to `~/.config/iatemplate2pdf/config.json`.
 
 ## How it works
 

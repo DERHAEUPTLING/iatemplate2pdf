@@ -10,11 +10,13 @@ func startMCPServer() async {
         capabilities: .init(tools: .init())
     )
 
-    let tool = Tool(
+    let convertTool = Tool(
         name: "iatemplate2pdf",
         description: "Convert one or more Markdown files to PDF using an iA Writer template. "
             + "Produces PDFs with headers, footers, page numbers, and custom typography — "
-            + "identical to iA Writer's native PDF export.",
+            + "identical to iA Writer's native PDF export. "
+            + "If the server reports that no default template or author is configured, "
+            + "call `list_templates` and `set_defaults` first to bootstrap the configuration.",
         inputSchema: .object([
             "type": .string("object"),
             "properties": .object([
@@ -44,21 +46,64 @@ func startMCPServer() async {
         ])
     )
 
+    let listTemplatesTool = Tool(
+        name: "list_templates",
+        description: "List all iA Writer templates found on the system, plus the currently configured "
+            + "default template and author. Use this to discover available templates before calling "
+            + "`set_defaults`, or to check the current configuration.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "properties": .object([:]),
+        ])
+    )
+
+    let setDefaultsTool = Tool(
+        name: "set_defaults",
+        description: "Persist default template and/or author name in the user's config "
+            + "(\(AppConfig.configFileDisplay)). Equivalent to the CLI `--setup` command, "
+            + "but callable from MCP. At least one of `template` or `author` must be provided. "
+            + "The `template` parameter accepts either an absolute path to a `.iatemplate` bundle "
+            + "or a template name (as shown by `list_templates`). Relative paths are not supported. "
+            + "Call `list_templates` first if you don't know which templates are available.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "properties": .object([
+                "template": .object([
+                    "type": .string("string"),
+                    "description": .string("Template name (e.g. \"Standard\") or absolute path to a .iatemplate bundle. Optional."),
+                ]),
+                "author": .object([
+                    "type": .string("string"),
+                    "description": .string("Author name used in document headers. Optional."),
+                ]),
+            ]),
+        ])
+    )
+
     await server.withMethodHandler(ListTools.self) { _ in
-        ListTools.Result(tools: [tool])
+        ListTools.Result(tools: [convertTool, listTemplatesTool, setDefaultsTool])
     }
 
     await server.withMethodHandler(CallTool.self) { params in
-        guard params.name == "iatemplate2pdf" else {
-            return CallTool.Result(
-                content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)],
-                isError: true
-            )
+        switch params.name {
+        case "iatemplate2pdf":
+            return await handleConversion(params.arguments)
+        case "list_templates":
+            return handleListTemplates()
+        case "set_defaults":
+            return handleSetDefaults(params.arguments)
+        default:
+            return textResult("Unknown tool: \(params.name)", isError: true)
         }
-        return await handleConversion(params.arguments)
     }
 
     let transport = StdioTransport()
+    // Note: the process does not exit cleanly on stdin EOF. The MCP SDK's
+    // receive loop terminates, but request handlers run as detached tasks
+    // the SDK doesn't track, and main.swift's RunLoop.main.run() can't be
+    // unwound via CFRunLoopStop. Real MCP hosts keep stdin open and SIGTERM
+    // on shutdown, so this is harmless in production. Test scripts must
+    // poll for expected responses and kill the process (see scripts/test-mcp.sh).
     do {
         try await server.start(transport: transport)
         await server.waitUntilCompleted()
@@ -143,6 +188,128 @@ private func handleConversion(_ arguments: [String: Value]?) async -> CallTool.R
 
     let isError = result.hasPrefix("Error:")
     return textResult(result, isError: isError)
+}
+
+// MARK: - list_templates handler
+
+private func handleListTemplates() -> CallTool.Result {
+    let templates = AppConfig.findTemplates()
+    let currentTemplate = AppConfig.loadDefaultTemplate()
+    let currentAuthor = AppConfig.loadAuthor()
+
+    var lines: [String] = []
+
+    if templates.isEmpty {
+        lines.append("No iA Writer templates found on this system.")
+        lines.append("Install iA Writer, or place .iatemplate bundles in one of:")
+        for dir in AppConfig.templateSearchPaths {
+            lines.append("  \(dir)")
+        }
+    } else {
+        lines.append("Available templates:")
+        for t in templates {
+            let marker = (t.path == currentTemplate) ? " (current default)" : ""
+            lines.append("  - \(t.name)\(marker)")
+            lines.append("      \(t.path)")
+        }
+    }
+
+    lines.append("")
+    lines.append("Current configuration:")
+    lines.append("  default template: \(currentTemplate ?? "(not set)")")
+    lines.append("  author:           \(currentAuthor ?? "(not set)")")
+
+    return textResult(lines.joined(separator: "\n"))
+}
+
+// MARK: - set_defaults handler
+
+private func handleSetDefaults(_ arguments: [String: Value]?) -> CallTool.Result {
+    let templateArg = arguments?["template"]?.stringValue
+    let authorArg = arguments?["author"]?.stringValue
+
+    if templateArg == nil && authorArg == nil {
+        return textResult(
+            "Error: set_defaults requires at least one of `template` or `author`.",
+            isError: true
+        )
+    }
+
+    // Validate everything before any mutation, so a bad author doesn't
+    // leave a half-applied template save behind.
+    var resolvedTemplate: String?
+    if let templateInput = templateArg {
+        let resolution = resolveTemplateInput(templateInput)
+        if let error = resolution.error {
+            return textResult(error, isError: true)
+        }
+        resolvedTemplate = resolution.path
+    }
+
+    var resolvedAuthor: String?
+    if let authorInput = authorArg {
+        let trimmed = authorInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return textResult(
+                "Error: `author` must not be empty. Provide a non-whitespace name like \"Jane Doe\".",
+                isError: true
+            )
+        }
+        resolvedAuthor = trimmed
+    }
+
+    var changes: [String] = []
+    if let path = resolvedTemplate {
+        AppConfig.saveDefaultTemplate(path)
+        changes.append("default template → \(path)")
+    }
+    if let author = resolvedAuthor {
+        AppConfig.saveAuthor(author)
+        changes.append("author → \(author)")
+    }
+
+    var lines = ["Saved:"]
+    lines.append(contentsOf: changes.map { "  \($0)" })
+    lines.append("")
+    lines.append("Config file: \(AppConfig.configFileDisplay)")
+    return textResult(lines.joined(separator: "\n"))
+}
+
+/// Resolve a template argument that may be either an absolute path to an
+/// .iatemplate bundle or a template name. On success, `path` is the canonical
+/// bundle path and `error` is nil. On failure, `error` holds a user-facing message.
+private func resolveTemplateInput(_ input: String) -> (path: String?, error: String?) {
+    let fm = FileManager.default
+
+    // Path-like: anything containing a slash. Must be absolute.
+    if input.contains("/") {
+        guard input.hasPrefix("/") else {
+            return (nil,
+                "Error: '\(input)' looks like a path but is not absolute. "
+                + "Use an absolute path (starting with /) or a template name from list_templates.")
+        }
+        let normalized = URL(fileURLWithPath: input).path
+        guard fm.fileExists(atPath: normalized) else {
+            return (nil, "Error: '\(normalized)' does not exist.")
+        }
+        let plist = normalized.appendingPath("Contents/Info.plist")
+        guard fm.fileExists(atPath: plist) else {
+            return (nil,
+                "Error: '\(normalized)' is not a valid .iatemplate bundle (missing Contents/Info.plist).")
+        }
+        return (normalized, nil)
+    }
+
+    let templates = AppConfig.findTemplates()
+    if let match = templates.first(where: { $0.name == input }) {
+        return (match.path, nil)
+    }
+    let available = templates.isEmpty
+        ? "(no templates found on this system)"
+        : templates.map { "  - \($0.name)" }.joined(separator: "\n")
+    return (nil,
+        "Error: Template '\(input)' not found. Available templates:\n\(available)\n"
+        + "Call list_templates to see full paths, or set_defaults again with one of these names.")
 }
 
 // MARK: - Conversion via subprocess

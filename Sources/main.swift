@@ -44,6 +44,7 @@ func markdownToHTML(_ markdown: String) -> String? {
 struct AppConfig {
     static let configDir = NSString(string: "~/.config/iatemplate2pdf").expandingTildeInPath
     static let configFile = configDir.appendingPath("config.json")
+    static let configFileDisplay = "~/.config/iatemplate2pdf/config.json"
 
     static func systemUserName() -> String {
         return NSFullUserName().isEmpty ? NSUserName() : NSFullUserName()
