@@ -576,10 +576,11 @@ func convertFile(inputURL: URL, outputURL: URL, template: TemplateConfig, render
         return false
     }
 
-    let ok = writePDFWithMetadata(
+    var ok = writePDFWithMetadata(
         inputPath: tmpPDF, outputURL: outputURL,
         title: docTitle, author: author
     )
+    if ok { ok = copyLinkAnnotations(from: bodyDoc, toFile: outputURL) }
     if ok { fputs("  → \(outputURL.path)\n", stderr) }
     else { fputs("  Error: Metadata write failed\n", stderr) }
 
@@ -619,6 +620,40 @@ func writePDFWithMetadata(inputPath: String, outputURL: URL, title: String, auth
 
     ctx.closePDF()
     return true
+}
+
+// MARK: - Restore link annotations
+
+// WebKit's print output carries clickable links as /Link annotations, but drawing
+// pages into a new context (AnnotatedPDFPage, CGPDFContext) keeps only the vector
+// content. Body page and final page share the same geometry, so the annotation
+// bounds can be copied 1:1 onto the finished file.
+func copyLinkAnnotations(from body: PDFDocument, toFile url: URL) -> Bool {
+    guard let target = PDFDocument(url: url) else { return false }
+    var copied = 0
+    for i in 0..<min(body.pageCount, target.pageCount) {
+        guard let src = body.page(at: i), let dst = target.page(at: i) else { continue }
+        for a in src.annotations where a.type?.hasSuffix("Link") == true {
+            let link = PDFAnnotation(bounds: a.bounds, forType: .link, withProperties: nil)
+            if let u = a.url {
+                link.url = u
+            } else if let go = a.action as? PDFActionGoTo,
+                      let page = go.destination.page,
+                      let destPage = target.page(at: body.index(for: page)) {
+                link.destination = PDFDestination(page: destPage, at: go.destination.point)
+            } else {
+                continue
+            }
+            let border = PDFBorder()
+            border.lineWidth = 0
+            link.border = border
+            dst.addAnnotation(link)
+            copied += 1
+        }
+    }
+    if copied == 0 { return true }
+    fputs("  Links: \(copied) restored\n", stderr)
+    return target.write(to: url)
 }
 
 // MARK: - CLI

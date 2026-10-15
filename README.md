@@ -150,7 +150,7 @@ Example.iatemplate/
       *.svg             # Logos and icons
 ```
 
-iatemplate2pdf reads `Info.plist` for configuration, inlines all CSS and SVG resources, then renders body, header, and footer as separate vector PDFs via macOS WebKit (`WKWebView` + `NSPrintOperation`). The final PDF is composed with PDFKit — everything stays vector, nothing gets rasterized.
+iatemplate2pdf reads `Info.plist` for configuration, inlines all CSS and SVG resources, then renders body, header, and footer as separate vector PDFs via macOS WebKit (`WKWebView` + `NSPrintOperation`). The final PDF is composed with PDFKit — everything stays vector, nothing gets rasterized. Link annotations from the WebKit output (clickable URLs and in-document anchors) are copied onto the finished pages, since drawing pages into a new context keeps only the vector content.
 
 ## Tests
 
